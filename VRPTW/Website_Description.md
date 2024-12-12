@@ -23,3 +23,56 @@ The following is an example of the Vehicle Routing Problem with Time Windows wit
 Demand of each customer is selected independently and uniformly at random from the range [1, 50]. Each customer, \(i\), is assigned a time window, \([e_i, l_i]\), between which they must be serviced. Service duration, \(s_i\), is set to a fixed value of 10 time units per customer. The maximum capacity of each vehicle is \(Q = 200\).
 
 Consider an example instance with \(N=8\), `num_nodes=9` and `better_than_baseline=0.95`. Let the baseline distance be 15.07. The instance generation returns a text file of the following format:
+
+```
+VEHICLE
+NUMBER    CAPACITY
+2          200
+
+CUSTOMER
+CUST NO.  XCOORD.   YCOORD.   DEMAND    READY TIME  DUE DATE   SERVICE TIME
+0         2         2         0            0        74             0
+1         0         0        14            0        32            10
+2         1         2        28            0        59            10
+3         3         1        17           14        44            10
+4         2         2        44            7        37            10
+5         0         2        45            0        45            10
+6         3         3        45            0        45            10
+7         1         3        44           23        53            10
+8         0         3        31            8        38            10
+```
+
+
+In this example, routes must have a total distance of 14.32 or less to be a solution.
+
+**Route 1**
+```
+Route: Depot -> 2 -> 5 -> 1 -> 8 -> 7 -> Depot
+Arrival Time: 0.00 -> 1.00 -> 12.00 -> 24.00 -> 37.00 -> 48.00 -> 59.41
+Demand = 28 + 45 + 14 + 31 + 44 = 162
+Distance = 1.00 + 1.00 + 2.00 + 3.00 + 1.00 + 1.41 = 9.41
+Waiting Time = 0.00, Schedule Time = 59.41
+```
+
+**Route 2**
+```
+Route: Depot -> 6 -> 3 -> 4 -> Depot
+Arrival Time: 0.00 -> 1.41 -> 14.00 -> 25.41 -> 35.41
+Demand = 45 + 17 + 44 = 106
+Distance = 1.41 + 2.59 + 1.41 = 4.83
+Waiting Time = 0.59, Schedule Time = 35.41
+```
+
+## Summary
+```
+Total Distance = 9.41 + 4.83 = 14.24
+Total Number of Vehicles = 2
+Total Schedule Time = 59.41 + 35.41 = 94.83
+Total Waiting Time = 0.00 + 0.59 = 0.59
+```
+
+When evaluating these routes, each route has a load less than 200, the time window constraints are satisfied, and the total distance is shorter than 14.32, thereby these routes are a solution.
+
+# Our Challenge
+
+In TIG, the baseline route is determined by using Solomon's I1 insertion heuristic that iteratively inserts customers into routes based on a cost function that balances distance and time constraints. The routes are built one by one until all customers are served. The goal is to produce a solution better than the baseline’s total distance by at least the specified factor (`better_than_baseline`), while ensuring all VRPTW constraints are satisfied. Please see the challenge code for a precise specification.

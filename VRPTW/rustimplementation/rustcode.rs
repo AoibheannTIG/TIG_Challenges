@@ -1,10 +1,11 @@
 use anyhow::{anyhow, Result};
 use rand::{
     rngs::{SmallRng, StdRng},
-    Rng, SeedableRng,
+    Rng, SeedableRng, seq::SliceRandom,
 };
 use serde::{Deserialize, Serialize};
 use serde_json::{from_value, Map, Value};
+use std::collections::HashSet;
 
 #[cfg(feature = "cuda")]
 use crate::CudaKernel;
@@ -53,8 +54,41 @@ pub struct Challenge {
     pub difficulty: Difficulty,
     pub demands: Vec<i32>,
     pub distance_matrix: Vec<Vec<i32>>,
+    pub ready_times: Vec<i32>,
+    pub due_dates: Vec<i32>,
+    pub service_time: i32,
     pub max_total_distance: i32,
     pub max_capacity: i32,
+    pub max_num_vehicles: usize,
+}
+
+/// -------------------------------
+/// Helper Functions for Instance Generation
+/// -------------------------------
+#[inline]
+fn euclidean_distance(p1: (i32, i32), p2: (i32, i32)) -> i32 {
+    let dx = (p1.0 - p2.0) as f64;
+    let dy = (p1.1 - p2.1) as f64;
+    dx.hypot(dy).round() as i32
+}
+
+#[inline]
+fn calculate_probability(point: (i32, i32), seeds: &[(i32, i32)]) -> f64 {
+    seeds.iter()
+         .map(|&seed| {
+             let dist = euclidean_distance(point, seed) as f64;
+             (-dist / 40.0).exp()
+         })
+         .sum()
+}
+
+#[inline]
+fn find_nearest_cluster(point: (i32, i32), seeds: &[(i32, i32)]) -> i32 {
+    seeds.iter()
+         .enumerate()
+         .min_by_key(|(_, &seed)| euclidean_distance(point, seed))
+         .map(|(idx, _)| idx as i32)
+         .unwrap_or(-1)
 }
 
 // TIG dev bounty available for a GPU optimisation for instance generation!
@@ -77,16 +111,113 @@ impl crate::ChallengeTrait<Solution, Difficulty, 2> for Challenge {
         let mut rng = SmallRng::from_seed(StdRng::from_seed(seed).gen());
 
         let num_nodes = difficulty.num_nodes;
-        let max_capacity = 100;
+        let max_capacity = 200;
+        let n = num_nodes - 1;
+        let grid_size = 1000;
+        let depot = (500, 500);
 
-        let mut node_positions: Vec<(f64, f64)> = (0..num_nodes)
-            .map(|_| (rng.gen::<f64>() * 500.0, rng.gen::<f64>() * 500.0))
-            .collect();
-        node_positions[0] = (250.0, 250.0); // Depot is node 0, and in the center
+        // Generate seed points for clustering.
+        let max_seeds = std::cmp::min(n, 8);
+        let num_seeds = if max_seeds >= 3 { rng.gen_range(3..=max_seeds) } else { 1 };
+        let mut seeds: Vec<(i32, i32)> = Vec::with_capacity(num_seeds);
+        let mut used_points = HashSet::with_capacity(n * 2);
+        used_points.insert(depot);
+        while seeds.len() < num_seeds {
+            let candidate = (rng.gen_range(0..grid_size), rng.gen_range(0..grid_size));
+            if used_points.insert(candidate) {
+                seeds.push(candidate);
+            }
+        }
 
-        let mut demands: Vec<i32> = (0..num_nodes).map(|_| rng.gen_range(15..30)).collect();
+        // Build node_positions: start with depot then seed points.
+        let mut node_positions: Vec<(i32, i32)> = Vec::with_capacity(n + 1);
+        node_positions.push(depot);
+        node_positions.extend(seeds.iter().copied());
+
+        // Initialize cluster assignments for depot and seeds.
+        let mut cluster_assignments: Vec<i32> = vec![-1; node_positions.len()];
+        for i in 0..num_seeds {
+            cluster_assignments[i + 1] = i as i32;
+        }
+
+        // Generate additional clustered nodes until roughly half of the customers.
+        while node_positions.len() < (n / 2) + 1 {
+            let candidate = (rng.gen_range(0..grid_size), rng.gen_range(0..grid_size));
+            if used_points.insert(candidate) {
+                if rng.gen::<f64>() < calculate_probability(candidate, &seeds) {
+                    node_positions.push(candidate);
+                    let cluster_idx = find_nearest_cluster(candidate, &seeds);
+                    cluster_assignments.push(cluster_idx);
+                }
+            }
+        }
+
+        // Generate remaining random nodes.
+        while node_positions.len() < n + 1 {
+            let candidate = (rng.gen_range(0..grid_size), rng.gen_range(0..grid_size));
+            if used_points.insert(candidate) {
+                node_positions.push(candidate);
+                cluster_assignments.push(-1);
+            }
+        }
+
+        let mut demands: Vec<i32> = (0..num_nodes).map(|_| rng.gen_range(1..36)).collect();
         demands[0] = 0; // Depot demand is 0
 
+        // Compute time window parameters.
+        let total_demand: i32 = demands.iter().skip(1).sum();
+        let avg_demand = total_demand as f64 / n as f64;
+        let avg_route_size = 200.0 / avg_demand;
+        let avg_distance = (1000.0 / 4.0) * 0.5214;
+        let max_distance = node_positions.iter().skip(1)
+            .map(|&p| euclidean_distance(depot, p))
+            .max()
+            .unwrap_or(0);
+        let service_time = 10;
+        let depot_due_date = (max_distance as f64 + (avg_distance + service_time as f64) * avg_route_size)
+            .round() as i32;
+
+        let mut ready_times = vec![0; n + 1];
+        let mut due_dates = vec![0; n + 1];
+        due_dates[0] = depot_due_date;
+
+        // Assign due dates and initial ready times.
+        for i in 1..=n {
+            let dist_from_depot = euclidean_distance(depot, node_positions[i]);
+            let min_due = dist_from_depot;
+            let mut max_due = depot_due_date - service_time - dist_from_depot;
+            if max_due <= min_due {
+                max_due = min_due + 1;
+            }
+            due_dates[i] = rng.gen_range(min_due..max_due);
+            ready_times[i] = 0;
+        }
+
+        // Adjust due dates for clustered customers.
+        for i in 1..=n {
+            if cluster_assignments[i] != -1 {
+                let dist_from_depot = euclidean_distance(depot, node_positions[i]);
+                let min_due = dist_from_depot;
+                let max_due = depot_due_date - service_time - dist_from_depot;
+                let seed_index = (cluster_assignments[i] + 1) as usize;
+                due_dates[i] = (due_dates[i] + due_dates[seed_index]) / 2;
+                if due_dates[i] < min_due {
+                    due_dates[i] = min_due;
+                } else if due_dates[i] > max_due {
+                    due_dates[i] = max_due;
+                }
+            }
+        }
+
+        // For a random subset of customers, set nonzero ready times.
+        let density = 0.5;
+        let mut idxs: Vec<usize> = (1..=n).collect();
+        idxs.shuffle(&mut rng);
+        let threshold = ((n as f64) * density).round() as usize;
+        for &cust_idx in idxs.iter().take(threshold) {
+            let window = rng.gen_range(10..61);
+            ready_times[cust_idx] = due_dates[cust_idx].saturating_sub(window);
+        }
         let distance_matrix: Vec<Vec<i32>> = node_positions
             .iter()
             .map(|&from| {

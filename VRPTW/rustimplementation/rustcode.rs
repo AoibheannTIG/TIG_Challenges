@@ -232,46 +232,70 @@ impl crate::ChallengeTrait<Solution, Difficulty, 2> for Challenge {
             })
             .collect();
 
-        let baseline_routes =
-            calc_baseline_routes(num_nodes, max_capacity, &demands, &distance_matrix)?;
+        let baseline_routes = calc_baseline_routes(
+            num_nodes,
+            &distance_matrix,
+            &demands,
+            &ready_times,
+            &due_dates,
+            service_time as f64,
+            max_capacity,
+        );
         let baseline_routes_total_distance = calc_routes_total_distance(
             num_nodes,
-            max_capacity,
-            &demands,
             &distance_matrix,
             &baseline_routes,
+            &demands,
+            &ready_times,
+            &due_dates,
+            service_time as f64,
+            max_capacity,
         )?;
         let max_total_distance = (baseline_routes_total_distance
             * (1000 - difficulty.better_than_baseline as i32)
             / 1000) as i32;
+        let max_num_vehicles = baseline_routes.len();
 
         Ok(Challenge {
             seed,
             difficulty: difficulty.clone(),
             demands,
             distance_matrix,
+            ready_times,
+            due_dates,
+            service_time,
             max_total_distance,
             max_capacity,
+            max_num_vehicles,
         })
     }
 
     fn verify_solution(&self, solution: &Solution) -> Result<()> {
         let total_distance = calc_routes_total_distance(
             self.difficulty.num_nodes,
-            self.max_capacity,
-            &self.demands,
             &self.distance_matrix,
             &solution.routes,
+            &self.demands,
+            &self.ready_times,
+            &self.due_dates,
+            self.service_time as f64,
+            self.max_capacity,
         )?;
-        if total_distance <= self.max_total_distance {
-            Ok(())
-        } else {
+        if total_distance > self.max_total_distance as f64 {
             Err(anyhow!(
                 "Total distance ({}) exceeds max total distance ({})",
                 total_distance,
                 self.max_total_distance
             ))
         }
+        if solution.routes.len() > self.max_num_vehicles {
+            Err(anyhow!(
+                "Total number of route ({}) exceeds max number of vehicles ({})",
+                solution.routes.len(),
+                self.max_num_vehicles   
+            ))
+        }
+        Ok(())
     }
 }
 
@@ -318,10 +342,13 @@ pub fn calc_baseline_routes(
 
 pub fn calc_routes_total_distance(
     num_nodes: usize,
-    max_capacity: i32,
-    demands: &Vec<i32>,
     distance_matrix: &Vec<Vec<i32>>,
     routes: &Vec<Vec<usize>>,
+    demands: &Vec<i32>,
+    ready_times: &Vec<i32>,
+    due_dates: &Vec<i32>,
+    service_time: i32,
+    max_capacity: i32,
 ) -> Result<i32> {
     let mut total_distance = 0;
     let mut visited = vec![false; num_nodes];
@@ -333,6 +360,7 @@ pub fn calc_routes_total_distance(
         }
 
         let mut capacity = max_capacity;
+        let mut curr_time = 0.0;
         let mut current_node = 0;
 
         for &node in &route[1..route.len() - 1] {
@@ -341,6 +369,14 @@ pub fn calc_routes_total_distance(
                     "The same non-depot node cannot be visited more than once"
                 ));
             }
+            let travel_time = distance_matrix[current_node][node];
+            curr_time += travel_time;
+            if curr_time > due_dates[node] {
+                return Err(anyhow!("A customer is reached after its due time"));
+            }
+            if curr_time < ready_times[node] {
+                curr_time = ready_times[node];
+            }
             if demands[node] > capacity {
                 return Err(anyhow!(
                     "The total demand on each route must not exceed max capacity"
@@ -348,7 +384,8 @@ pub fn calc_routes_total_distance(
             }
             visited[node] = true;
             capacity -= demands[node];
-            total_distance += distance_matrix[current_node][node];
+            total_distance += travel_time;
+            curr_time += service_time;
             current_node = node;
         }
 
